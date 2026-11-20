@@ -25,7 +25,7 @@ if not exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 ) else (
     echo [1/3] Existing virtual environment ^(.venv^) found.
-    echo [2/3] Verifying dependencies...
+    echo [2/3] Skipping installation ^(.venv is already set up^).
 )
 
 REM 2. Launch the Streamlit AML & Core Banking Dashboard
