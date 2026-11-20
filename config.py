@@ -1,11 +1,18 @@
 """
-AML System Configuration
-Paths, hyperparameters, and global settings.
+AML System Central Configuration Module.
+Defines portable file-system paths, model training constants, the 30 engineered
+financial and graph-topological feature names, and human-readable Explainable AI (XAI) metadata.
 """
 from pathlib import Path
 
-# Base Paths (Dynamic relative resolution for portability across environments and GitHub clones)
+# ---------------------------------------------------------------------------
+# 1. Portable Base Directory & Dataset Path Resolution
+# ---------------------------------------------------------------------------
+# Resolves PROJECT_DIR dynamically relative to this file so the repository
+# works out-of-the-box on any machine or directory location after cloning.
 PROJECT_DIR = Path(__file__).resolve().parent
+
+# Locate the raw CSV dataset folder if present locally or in parent directories
 if (PROJECT_DIR / "Data_Backup").exists():
     RAW_DATA_DIR = PROJECT_DIR / "Data_Backup"
 elif (PROJECT_DIR.parent / "Data_Backup").exists():
@@ -15,37 +22,50 @@ elif (PROJECT_DIR.parent.parent / "Data_Backup").exists():
 else:
     RAW_DATA_DIR = PROJECT_DIR / "data"
 
-# Dataset Files
+# Raw IBM HI-Small AML Dataset Files (used when running scripts/run_pipeline.py)
 ACCOUNTS_CSV = RAW_DATA_DIR / "HI-Small_accounts.csv"
 TRANSACTIONS_CSV = RAW_DATA_DIR / "HI-Small_Trans.csv"
 PATTERNS_TXT = RAW_DATA_DIR / "New Text Document.txt"
 
-# Output & Database Paths
+# ---------------------------------------------------------------------------
+# 2. SQLite Database & Serialized Model Artifact Paths
+# ---------------------------------------------------------------------------
 DB_PATH = PROJECT_DIR / "aml_system.db"
 SAVED_MODELS_DIR = PROJECT_DIR / "saved_models"
 SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Training Settings
-RANDOM_STATE = 42
-TEST_SIZE = 0.2
-DEFAULT_SAMPLE_SIZE = 250000  # For fast and robust prototype training
+# ---------------------------------------------------------------------------
+# 3. Model Training & Sampling Hyperparameters
+# ---------------------------------------------------------------------------
+RANDOM_STATE = 42               # Fixed random seed for reproducible splits and GNN initialization
+TEST_SIZE = 0.2                 # 80% training / 20% unseen stratified test split
+DEFAULT_SAMPLE_SIZE = 250000    # Number of legitimate transactions sampled alongside all laundering txs
 
-# Feature Columns
+# ---------------------------------------------------------------------------
+# 4. Engineered Feature Vector Schema (30 Behavioral & Graph Features)
+# ---------------------------------------------------------------------------
 FEATURE_COLUMNS = [
+    # Inbound/Outbound Transaction Counts & Volume Totals
     "total_tx_in", "total_tx_out", "total_tx_count",
     "total_amount_in", "total_amount_out", "net_flow",
+    # Statistical Dispersion & Extremes per Account
     "avg_amount_in", "avg_amount_out", "max_amount_in", "max_amount_out",
     "std_amount_in", "std_amount_out",
+    # Counterparty Diversity & Pass-Through Flow Ratios
     "unique_senders", "unique_receivers",
     "in_out_tx_ratio", "in_out_amount_ratio",
+    # Payment Rail Usage & Sub-$10K BSA Structuring ("Smurfing") Counts
     "ach_tx_count", "wire_tx_count", "cheque_tx_count",
     "in_degree", "out_degree", "degree_centrality",
     "reinvestment_tx_count", "smurfing_tx_count",
+    # 1-Hop & 2-Hop Graph Neighborhood Message-Passing Aggregations
     "neighbor_ach_avg", "neighbor_reinv_avg", "neighbor_smurf_avg",
     "neighbor_degree_avg", "neighbor_tx_avg", "hop2_ach_avg"
 ]
 
-# Human-Readable Feature Metadata for Explainable AI (XAI)
+# ---------------------------------------------------------------------------
+# 5. Human-Readable Feature Metadata for Explainable AI (XAI) & Dashboard UI
+# ---------------------------------------------------------------------------
 FEATURE_METADATA = {
     "ach_tx_count": {
         "label": "ACH Electronic Transfers Count",
@@ -199,8 +219,9 @@ FEATURE_METADATA = {
     }
 }
 
+
 def format_feature_name(feat_name: str) -> str:
-    """Returns a user-friendly, understandable label for a feature key."""
+    """Return a human-friendly display label for a technical feature column name."""
     if feat_name in FEATURE_METADATA:
         return FEATURE_METADATA[feat_name]["label"]
     return feat_name.replace("_", " ").title()

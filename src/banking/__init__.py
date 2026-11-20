@@ -1,7 +1,4 @@
 """
-Banking module for the AML Detection System.
-Provides inter-account transfers, balance management, and automated AML compliance blocking.
+Core Banking & Real-Time AML Interception Package (`src.banking`).
+Manages interbank ledger transfers, real-time ML screening, forensic block reasons, and compliance overrides.
 """
-from src.banking.banking_service import BankingService
-
-__all__ = ["BankingService"]

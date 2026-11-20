@@ -1,9 +1,8 @@
 """
-Combined XGBoost + GraphSAGE Ensemble for AML Detection.
-Combines gradient-boosted decision trees (tabular flow analysis) with
-Graph Neural Networks (topological neighborhood structure aggregation).
-Specifically calibrated and evaluated using PR-AUC (Precision-Recall AUC / Average Precision)
-to excel in extreme class imbalance where laundering transactions represent ~0.1% of volume.
+Combined (XGBoost + GraphSAGE) Ensemble Model.
+Blends XGBoost (tabular transaction flows) and GraphSAGE (network graph connections)
+into one final laundering risk score.
+Evaluated using ROC-AUC and PR-AUC only (no accuracy, precision, recall, or F1).
 """
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -12,16 +11,13 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
     roc_auc_score,
     average_precision_score
 )
 from sklearn.model_selection import train_test_split
-
 import sys
+
+# Add project root folder so imports work from anywhere
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config import SAVED_MODELS_DIR, RANDOM_STATE
 from src.models.xgboost_model import AMLXGBoost
@@ -30,11 +26,15 @@ from src.models.graphsage_model import AMLGraphSAGE, InductiveGraphSAGE
 
 class AMLCombinedXGBoostGraphSAGE:
     """
-    Flagship AML detector combining XGBoost and GraphSAGE.
-    Calibrated on the Precision-Recall curve (PR-AUC) so that:
-      - P_xgb and P_sage share a unified, well-calibrated probability scale (50% = PR-curve optimal threshold),
-      - P_combined = w_xgb * P_xgb + w_sage * P_sage achieves higher PR-AUC and ROC-AUC than either standalone model.
+    Combined Ensemble Model.
+    Why these weights and threshold are used:
+      - xgb_weight=0.50 & sage_weight=0.50: Gives equal 50/50 importance to individual account
+        behavior (XGBoost) and surrounding network ring connections (GraphSAGE), preventing either
+        model from overpowering the final score.
+      - optimal_threshold=0.50: Since both sub-models are calibrated so their PR-curve cutoff sits
+        at 50%, any combined score >= 50% (0.50) indicates laundering.
     """
+
     def __init__(
         self,
         xgb_weight: float = 0.50,
@@ -57,6 +57,7 @@ class AMLCombinedXGBoostGraphSAGE:
         val_size: float = 0.20,
         optimize_weights: bool = True
     ):
+        """Train both sub-models and pick the best blend weight around 50/50 using validation PR-AUC."""
         self.feature_names = list(X.columns)
         n_samples = len(X)
 
@@ -82,10 +83,10 @@ class AMLCombinedXGBoostGraphSAGE:
         pr_val_xgb = average_precision_score(y_val, p_val_xgb)
         pr_val_sage = average_precision_score(y_val, p_val_sage)
 
+        # Test blend weights between 0.45 and 0.55 so both models always contribute almost equally
         if optimize_weights:
             best_weight = 0.50
             best_pr_auc = 0.0
-            # Constrain blend weights to balanced range [0.45, 0.55] so both models contribute meaningfully
             for w in np.linspace(0.45, 0.55, 21):
                 p_comb = w * p_val_xgb + (1.0 - w) * p_val_sage
                 score = average_precision_score(y_val, p_comb)
@@ -113,6 +114,7 @@ class AMLCombinedXGBoostGraphSAGE:
         X: pd.DataFrame,
         adj_coo: Optional[sp.coo_matrix] = None
     ) -> np.ndarray:
+        """Calculate the weighted average laundering probability: w_xgb * P_xgb + w_sage * P_sage."""
         p_xgb = self.xgb_model.predict_proba(X)
         p_sage = self.sage_model.predict_proba(X, adj_coo)
         return self.xgb_weight * p_xgb + self.sage_weight * p_sage
@@ -123,6 +125,7 @@ class AMLCombinedXGBoostGraphSAGE:
         adj_coo: Optional[sp.coo_matrix] = None,
         threshold: Optional[float] = None
     ) -> np.ndarray:
+        """Return 1 (Laundering) if combined probability >= threshold (default 50%), else 0."""
         th = threshold if threshold is not None else self.optimal_threshold
         probs = self.predict_proba(X, adj_coo)
         return (probs >= th).astype(int)
@@ -134,31 +137,21 @@ class AMLCombinedXGBoostGraphSAGE:
         adj_test: Optional[sp.coo_matrix] = None,
         threshold: Optional[float] = None
     ) -> Dict[str, Any]:
+        """Calculate only ROC-AUC and PR-AUC on the test set."""
         probs = self.predict_proba(X_test, adj_test)
         th = threshold if threshold is not None else self.optimal_threshold
-        preds = (probs >= th).astype(int)
-
-        pr_auc = average_precision_score(y_test, probs)
-        roc_auc = roc_auc_score(y_test, probs)
-        acc = accuracy_score(y_test, preds)
-        prec = precision_score(y_test, preds, zero_division=0)
-        rec = recall_score(y_test, preds, zero_division=0)
-        f1 = f1_score(y_test, preds, zero_division=0)
 
         return {
             "model_name": "Combined (XGBoost + GraphSAGE)",
-            "accuracy": round(float(acc), 4),
-            "precision": round(float(prec), 4),
-            "recall": round(float(rec), 4),
-            "f1_score": round(float(f1), 4),
-            "roc_auc": round(float(roc_auc), 4),
-            "pr_auc": round(float(pr_auc), 4),
+            "roc_auc": round(float(roc_auc_score(y_test, probs)), 4),
+            "pr_auc": round(float(average_precision_score(y_test, probs)), 4),
             "xgb_weight": self.xgb_weight,
             "sage_weight": self.sage_weight,
             "decision_threshold": th
         }
 
     def get_feature_importances(self) -> pd.DataFrame:
+        """Blend feature importance scores from XGBoost and GraphSAGE using their ensemble weights."""
         fi_xgb = self.xgb_model.get_feature_importances().set_index("feature_name")["importance"]
         fi_sage = self.sage_model.get_feature_importances().set_index("feature_name")["importance"]
 
@@ -175,12 +168,19 @@ class AMLCombinedXGBoostGraphSAGE:
         return df
 
     def save(self, path: Path = SAVED_MODELS_DIR / "combined_model.joblib"):
+        """Save both sub-models, ensemble weights, and plain-English documentation into a single file."""
         bundle = {
             "xgb_weight": self.xgb_weight,
             "sage_weight": self.sage_weight,
             "optimal_threshold": self.optimal_threshold,
             "feature_names": self.feature_names,
             "calibration_metrics": self.calibration_metrics,
+            "documentation": {
+                "summary": "Combined (XGBoost + GraphSAGE) Flagship AML Ensemble Model.",
+                "xgb_weight": f"{self.xgb_weight} (50% weight given to individual account tabular flows)",
+                "sage_weight": f"{self.sage_weight} (50% weight given to 1-hop and 2-hop graph network connections)",
+                "optimal_threshold": f"{self.optimal_threshold} (accounts with >= 50% risk are blocked as laundering)"
+            },
             "xgb_state": {
                 "model": self.xgb_model.model,
                 "features": self.xgb_model.feature_names,
@@ -204,6 +204,7 @@ class AMLCombinedXGBoostGraphSAGE:
 
     @classmethod
     def load(cls, path: Path = SAVED_MODELS_DIR / "combined_model.joblib"):
+        """Load the saved Combined (XGBoost + GraphSAGE) model from disk."""
         bundle = joblib.load(path)
         inst = cls(
             xgb_weight=bundle.get("xgb_weight", 0.50),
@@ -213,12 +214,14 @@ class AMLCombinedXGBoostGraphSAGE:
         inst.feature_names = bundle.get("feature_names", [])
         inst.calibration_metrics = bundle.get("calibration_metrics", {})
 
+        # Rebuild XGBoost sub-model
         inst.xgb_model = AMLXGBoost()
         inst.xgb_model.model = bundle["xgb_state"]["model"]
         inst.xgb_model.feature_names = bundle["xgb_state"]["features"]
         inst.xgb_model.logit_shift = float(bundle["xgb_state"].get("logit_shift", 0.0))
         inst.xgb_model.logit_temp = float(bundle["xgb_state"].get("logit_temp", 1.55))
 
+        # Rebuild GraphSAGE sub-model
         sage_data = bundle["sage_state"]
         inst.sage_model = AMLGraphSAGE(hidden_dim=sage_data["hidden_dim"])
         inst.sage_model.feature_names = sage_data["features"]

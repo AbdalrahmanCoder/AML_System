@@ -1,7 +1,13 @@
 """
-Streamlit AML Investigation, Banking & Detection Dashboard.
-Integrates SQLite Database, loads PR-AUC calibrated ML models (XGBoost, GraphSAGE, and Combined XGBoost + GraphSAGE),
-and features a Core Banking System with Automated AML Compliance Interception (>=50% risk blocking).
+Streamlit AML Investigation, Core Banking & Real-Time Detection Dashboard.
+Architecture & Views:
+  1. System Overview: Executive KPIs, ROC-AUC / PR-AUC model benchmarks, and laundering typology distribution.
+  2. Exploratory Data Analysis (EDA): Mathematical deep-dive into ROC-AUC & PR-AUC, 5-stage skewed-data balancing,
+     BSA $10,000 CTR smurfing analysis, payment channel risk rates, typology ring taxonomy, and graph correlations.
+  3. Core Banking & Transfers: Real-time interbank transfer execution, searchable 206,239-account dropdowns,
+     factual forensic block reasons, persistent compliance state across page switches, and one-click Reset Demo.
+  4. Suspicious Accounts & Transaction Explorer: Interactive SQL inspection of accounts and payment flows.
+  5. Live ML Inference, Model Benchmarks & Explainability (XAI): Live probability scoring and feature attributions.
 """
 import streamlit as st
 import pandas as pd

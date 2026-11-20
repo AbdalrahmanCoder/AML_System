@@ -1,34 +1,41 @@
 """
-Core Banking Service with Automated AML Risk Interception.
-Manages account balances, ledger transfers, and real-time AML gatekeeping.
-If an account exceeds the laundering probability threshold (default 50%),
-it is automatically blocked from completing transactions and restricted from future transfers.
+Core Banking Service with Automated Real-Time AML Risk Interception.
+Manages account balances, interbank ledger transfers, real-time ML inference across
+XGBoost, GraphSAGE, and the Combined Ensemble, and factual forensic block reason generation.
 """
 import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import pandas as pd
 import numpy as np
-
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+# Ensure project root is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config import FEATURE_COLUMNS
 from src.database.db_manager import AMLDatabase
 
 
 class BankingService:
+    """
+    Core Banking & Real-Time AML Compliance Gatekeeper.
+    Screens every outgoing transfer before settlement:
+      - If laundering probability < blocking_threshold (default 50%), settles funds and logs transfer.
+      - If laundering probability >= blocking_threshold, intercepts the transfer, locks the sender account
+        (`is_blocked = 1`), and records specific data-backed forensic laundering reasons.
+    """
+
     def __init__(self, db: AMLDatabase, models: Optional[Dict[str, Any]] = None):
         self.db = db
         self.models = models or {}
 
     def set_models(self, models: Dict[str, Any]):
-        """Update or inject trained ML models (RF, XGBoost, GraphSAGE)."""
+        """Inject or update loaded ML models (XGBoost, GraphSAGE, Combined Ensemble)."""
         self.models = models
 
     def get_account(self, account_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve full account details including balance and block status."""
+        """Retrieve an account's complete profile, balance, and block status by ID."""
         return self.db.get_account_by_id(account_id)
 
     def search_accounts(
@@ -38,17 +45,14 @@ class BankingService:
         limit: int = 50
     ) -> pd.DataFrame:
         """
-        Search accounts for UI selection.
-        Filters:
-          - 'all': Any accounts
-          - 'active': Unblocked accounts (is_blocked = 0)
-          - 'blocked': Blocked accounts (is_blocked = 1)
-          - 'clean': Low risk legitimate accounts (is_suspicious = 0, risk_score < 0.1)
-          - 'high_risk': Suspicious accounts (risk_score >= 0.5 or is_suspicious = 1)
+        Query accounts matching an optional search string and compliance category filter
+        ('all', 'active', 'blocked', 'clean', or 'high_risk').
         """
-        sql = "SELECT account_id, bank_name, entity_name, balance, is_blocked, block_reason, risk_score, is_suspicious, pattern_type, total_tx_count FROM accounts WHERE 1=1"
+        sql = (
+            "SELECT account_id, bank_name, entity_name, balance, is_blocked, block_reason, "
+            "risk_score, is_suspicious, pattern_type, total_tx_count FROM accounts WHERE 1=1"
+        )
         params = []
-
         order_by = " ORDER BY total_tx_count DESC LIMIT ?"
 
         if filter_type == "active":
@@ -75,7 +79,7 @@ class BankingService:
             return pd.read_sql(sql, conn, params=params)
 
     def get_preset_accounts(self) -> Dict[str, Dict[str, Any]]:
-        """Provides verified testing presets for the banking interface."""
+        """Return pre-configured demonstration scenarios (Normal, High Risk, Critical Threat)."""
         return {
             "normal": {
                 "sender_id": "800042CB0",
@@ -84,7 +88,7 @@ class BankingService:
                 "format": "ACH",
                 "label": "🌟 Normal Flow (Approved Legitimate Transaction, Low Risk <20%)",
                 "expected": "APPROVED",
-                "description": "Legitimate sender with balanced flow. Evaluated risk is ~15% (<50%), so the transaction settles immediately."
+                "description": "Legitimate sender with balanced flow. Evaluated risk is ~10.4% (<50%), so the transaction settles immediately."
             },
             "high_risk": {
                 "sender_id": "8000FFF70",
@@ -102,16 +106,16 @@ class BankingService:
                 "format": "Wire",
                 "label": "🚨 Critical Laundering Threat (>70% -> High Outgoing Transactions Block)",
                 "expected": "BLOCKED_WITH_WARNING",
-                "description": "Sender evaluated at ~90.6% laundering risk with 1,659 outgoing transactions and 404 smurfing transfers. Triggers instant transaction block, locks the account, and displays factual forensic causes."
+                "description": "Sender evaluated at ~89.6% laundering risk with 1,659 outgoing transactions and 404 smurfing transfers. Triggers instant transaction block, locks the account, and displays factual forensic causes."
             }
         }
 
     def reset_demo_account(self, account_id: str, balance: float = 10000.0):
-        """Reset a demo account to unblocked with fresh balance for repeatable testing."""
+        """Reset a single account's balance to $10,000 and clear any block status."""
         self.db.reset_demo_account(account_id, balance)
 
     def reset_all_demo_data(self, balance: float = 10000.0):
-        """Reset all accounts, balances, and demo transfers back to their original state."""
+        """Reset all accounts, balances, block states, and demo transfer logs back to baseline."""
         if hasattr(self.db, "reset_all_demo_data"):
             self.db.reset_all_demo_data(balance)
         else:
@@ -119,7 +123,7 @@ class BankingService:
                 self.reset_demo_account(acc_id, balance)
 
     def deposit(self, account_id: str, amount: float) -> Dict[str, Any]:
-        """Deposit funds into an account balance."""
+        """Credit funds into an existing account's available balance."""
         if amount <= 0:
             return {"success": False, "message": "Deposit amount must be strictly positive."}
         acc = self.get_account(account_id)
@@ -135,7 +139,7 @@ class BankingService:
         }
 
     def set_block_status(self, account_id: str, is_blocked: bool, reason: str = "") -> Dict[str, Any]:
-        """Manual compliance toggle to block or unblock an account."""
+        """Manually block or unblock an account from the Compliance Desk."""
         acc = self.get_account(account_id)
         if not acc:
             return {"success": False, "message": f"Account '{account_id}' does not exist."}
@@ -155,8 +159,8 @@ class BankingService:
         payment_format: str
     ) -> Dict[str, Any]:
         """
-        Simulate updated account features reflecting the outgoing transfer
-        to run real-time predictive AML inference.
+        Project the sender's 30 behavioral features as if the proposed outgoing transfer were executed,
+        allowing the ML models to detect risky velocity/structuring spikes before settlement.
         """
         feat = dict(account)
         cur_tx_out = int(feat.get("total_tx_out", 0) or 0) + 1
@@ -173,6 +177,7 @@ class BankingService:
         feat["in_out_tx_ratio"] = (cur_tx_in + 1.0) / (cur_tx_out + 1.0)
         feat["in_out_amount_ratio"] = (cur_amt_in + 1.0) / (cur_amt_out + 1.0)
 
+        # Update payment channel counters based on transfer format
         fmt_lower = payment_format.lower()
         if "ach" in fmt_lower:
             prev_ach = float(feat.get("ach_tx_count", 0.0) or 0.0)
@@ -185,6 +190,7 @@ class BankingService:
         elif "reinvest" in fmt_lower:
             feat["reinvestment_tx_count"] = float(feat.get("reinvestment_tx_count", 0.0) or 0.0) + 1.0
 
+        # Flag sub-$10,000 BSA CTR structuring transfers ($2,500 - $9,999.99)
         if 2500.0 <= amount < 10000.0:
             feat["smurfing_tx_count"] = float(feat.get("smurfing_tx_count", 0.0) or 0.0) + 1.0
 
@@ -199,9 +205,9 @@ class BankingService:
         payment_format: str
     ) -> Dict[str, Any]:
         """
-        Runs ML models (XGBoost, GraphSAGE, and Combined XGBoost + GraphSAGE) on account features.
-        Evaluates both baseline sender risk and post-transfer simulated risk so outgoing transfers
-        never artificially dilute an existing laundering profile.
+        Evaluate the sender account across XGBoost, GraphSAGE, and the Combined Ensemble.
+        Takes the maximum of baseline account risk and post-transfer simulated risk so a small
+        outgoing transfer never artificially masks an existing laundering ring member.
         """
         base_df = pd.DataFrame([{col: account.get(col, 0.0) for col in FEATURE_COLUMNS}])
         sim_feat = self.simulate_sender_features(account, amount, payment_format)
@@ -218,6 +224,7 @@ class BankingService:
         }
 
         probs = []
+        # 1. XGBoost Tabular Risk
         if "XGBoost" in self.models:
             try:
                 xgb_base = float(self.models["XGBoost"].predict_proba(base_df)[0])
@@ -229,6 +236,7 @@ class BankingService:
             except Exception as e:
                 print(f"Error predicting with XGBoost: {e}")
 
+        # 2. GraphSAGE Graph Risk
         if "GraphSAGE" in self.models:
             try:
                 sage_base = float(self.models["GraphSAGE"].predict_proba(base_df)[0])
@@ -240,6 +248,7 @@ class BankingService:
             except Exception as e:
                 print(f"Error predicting with GraphSAGE: {e}")
 
+        # 3. Combined (XGBoost + GraphSAGE) Ensemble Risk
         if "Combined (XGBoost + GraphSAGE)" in self.models:
             try:
                 comb_model = self.models["Combined (XGBoost + GraphSAGE)"]
@@ -270,9 +279,9 @@ class BankingService:
         payment_format: str = ""
     ) -> List[str]:
         """
-        Derives factual, empirically verified forensic money-laundering indicators
-        from the account's historical profile, network graph features, and current transaction context.
-        Returns a prioritized list of clear, human-understandable forensic reasons.
+        Inspect the account's actual empirical features and network topology to return a
+        prioritized list of factual, human-readable forensic reasons explaining why the
+        account was blocked (e.g., High outgoing transactions, Sub-$10K smurfing, ACH velocity).
         """
         reasons = []
 
@@ -318,7 +327,7 @@ class BankingService:
         elif tx_in > tx_out and tx_out == 0 and tx_in >= 1:
             reasons.append(f"One-way inbound accumulation ({int(tx_in):,} inbound deposits with zero outbound settlements)")
 
-        # 3. Structuring / Smurfing (Sub-$10,000 CTR Evasion)
+        # 3. Structuring / Smurfing (Sub-$10,000 BSA CTR Evasion)
         if smurf_cnt > 0:
             reasons.append(f"Structuring / Smurfing detected ({int(smurf_cnt):,} transfers structured below $10,000 regulatory limit)")
         elif 5000 <= amount < 10000:
@@ -370,15 +379,18 @@ class BankingService:
         warning_threshold: float = 0.70
     ) -> Dict[str, Any]:
         """
-        Executes an inter-account transfer with real-time AML compliance screening.
-        - If laundering probability >= blocking_threshold (default 50%), transaction is BLOCKED.
-        - If laundering probability >= warning_threshold (default 70%), transaction is BLOCKED and
-          an urgent regulatory compliance warning notification is dispatched.
+        Execute an inter-account transfer with real-time AML compliance screening:
+          1. Validates positive transfer amount and distinct sender/recipient accounts.
+          2. Evaluates sender laundering probability across XGBoost, GraphSAGE, and Combined models.
+          3. Rejects immediately if sender or recipient is already blocked (`is_blocked = 1`).
+          4. Intercepts and locks down the sender account if risk >= `blocking_threshold`,
+             attaching factual forensic reasons to the account and audit ledger.
+          5. Otherwise settles the transfer atomically in SQLite.
         """
         transfer_id = f"TX-{uuid.uuid4().hex[:10].upper()}"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 1. Basic validation
+        # 1. Basic input validation
         if amount <= 0:
             return {
                 "success": False,
@@ -417,7 +429,7 @@ class BankingService:
         risk_eval = self.evaluate_aml_risk(sender, amount, payment_format)
         laundering_probability = risk_eval["highest_prob"]
 
-        # 2. Check if sender is ALREADY blocked
+        # 2. Check if sender is ALREADY blocked from a previous compliance intercept
         if int(sender.get("is_blocked", 0) or 0) == 1:
             reason = sender.get("block_reason") or "AML compliance restriction"
             forensic_reasons = self.generate_forensic_reasons(sender, amount, payment_format)
@@ -458,7 +470,7 @@ class BankingService:
                 "to_account": to_account_id
             }
 
-        # 3. Check if recipient is blocked
+        # 3. Check if recipient account is currently blocked
         if int(recipient.get("is_blocked", 0) or 0) == 1:
             reason = recipient.get("block_reason") or "AML compliance restriction"
             r_forensic = self.generate_forensic_reasons(recipient)
@@ -499,7 +511,7 @@ class BankingService:
                 "to_account": to_account_id
             }
 
-        # 4. Check sender balance
+        # 4. Verify sufficient sender balance
         sender_balance = float(sender.get("balance", 0.0) or 0.0)
         if sender_balance < amount:
             return {
@@ -509,7 +521,7 @@ class BankingService:
                 "message": f"Insufficient funds: Available balance is ${sender_balance:,.2f}, required ${amount:,.2f}."
             }
 
-        # 5. Apply compliance rule: Block if >= blocking_threshold (default 50%)
+        # 5. Automated AML Compliance Gatekeeper: Block if risk >= blocking_threshold
         if laundering_probability >= blocking_threshold:
             is_critical = laundering_probability >= warning_threshold
             forensic_reasons = self.generate_forensic_reasons(sender, amount, payment_format)
@@ -533,10 +545,10 @@ class BankingService:
                     f"Sender account {from_account_id} evaluated at {laundering_probability*100:.1f}% laundering risk (threshold: {blocking_threshold*100:.0f}%)."
                 )
 
-            # Lockdown sender account immediately
+            # Persist account lockdown in SQLite
             self.db.set_account_block_status(from_account_id, is_blocked=1, reason=block_msg)
 
-            # Record blocked attempt
+            # Log blocked transfer attempt in audit ledger
             self.db.record_banking_transfer({
                 "transfer_id": transfer_id,
                 "timestamp": timestamp,
@@ -547,7 +559,7 @@ class BankingService:
                 "payment_format": payment_format,
                 "status": "BLOCKED",
                 "laundering_probability": laundering_probability,
-                "rf_prob": risk_eval.get("rf_prob", 0.0),
+                "rf_prob": 0.0,
                 "xgb_prob": risk_eval["xgb_prob"],
                 "sage_prob": risk_eval["sage_prob"],
                 "combined_prob": risk_eval["combined_prob"],
@@ -573,7 +585,7 @@ class BankingService:
                 "to_account": to_account_id
             }
 
-        # 7. APPROVED: Execute ledger transfer in SQLite
+        # 6. APPROVED: Atomically debit sender, credit recipient, and record transaction in SQLite
         new_sender_balance = sender_balance - amount
         recipient_balance = float(recipient.get("balance", 0.0) or 0.0)
         new_recipient_balance = recipient_balance + amount
@@ -581,9 +593,8 @@ class BankingService:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Update balances and metrics on sender
             cursor.execute("""
-            UPDATE accounts 
+            UPDATE accounts
             SET balance = ?,
                 total_tx_out = total_tx_out + 1,
                 total_tx_count = total_tx_count + 1,
@@ -592,9 +603,8 @@ class BankingService:
             WHERE account_id = ?
             """, (new_sender_balance, amount, amount, from_account_id))
 
-            # Update balances and metrics on recipient
             cursor.execute("""
-            UPDATE accounts 
+            UPDATE accounts
             SET balance = ?,
                 total_tx_in = total_tx_in + 1,
                 total_tx_count = total_tx_count + 1,
@@ -603,7 +613,6 @@ class BankingService:
             WHERE account_id = ?
             """, (new_recipient_balance, amount, amount, to_account_id))
 
-            # Insert into core transactions table
             cursor.execute("""
             INSERT INTO transactions (
                 timestamp, from_bank, from_account, to_bank, to_account,
@@ -623,13 +632,12 @@ class BankingService:
                 payment_format
             ))
 
-            # Insert into banking audit ledger
             cursor.execute("""
             INSERT INTO banking_transfers (
                 transfer_id, timestamp, from_account, to_account, amount,
                 payment_currency, payment_format, status,
                 laundering_probability, rf_prob, xgb_prob, sage_prob, combined_prob, risk_decision, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?, ?, ?, ?, 'PASSED_COMPLIANCE', 'Transaction within acceptable AML risk limits')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, 0.0, ?, ?, ?, 'PASSED_COMPLIANCE', 'Transaction within acceptable AML risk limits')
             """, (
                 transfer_id,
                 timestamp,
@@ -639,7 +647,6 @@ class BankingService:
                 payment_currency,
                 payment_format,
                 laundering_probability,
-                risk_eval["rf_prob"],
                 risk_eval["xgb_prob"],
                 risk_eval["sage_prob"],
                 risk_eval["combined_prob"]

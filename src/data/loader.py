@@ -1,22 +1,24 @@
 """
-AML Dataset Loader & Pattern Parser
-Loads accounts, transactions, and laundering patterns.
+AML Dataset Loader & Laundering Pattern Parser.
+Loads accounts, transactions, and laundering patterns from the raw dataset files.
+Also assigns every suspicious account to one of the 8 laundering ring patterns.
 """
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Dict, Optional
+from typing import Dict, Optional
 import re
 import sys
 
+# Add project root folder so imports work from anywhere
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config import ACCOUNTS_CSV, TRANSACTIONS_CSV, PATTERNS_TXT
 
+
 def parse_patterns(patterns_path: Path = PATTERNS_TXT) -> Dict[str, str]:
     """
-    Parses the pattern definitions text file to map account numbers and
-    transactions to laundering typologies (FAN-OUT, CYCLE, GATHER-SCATTER, STACK, etc.).
-    Returns dict mapping account_id -> typology.
+    Read the pattern text file and map each account ID to its laundering pattern
+    (such as FAN-OUT, FAN-IN, CYCLE, GATHER-SCATTER, STACK, BIPARTITE, or RANDOM).
     """
     account_patterns = {}
     if not patterns_path.exists():
@@ -28,12 +30,15 @@ def parse_patterns(patterns_path: Path = PATTERNS_TXT) -> Dict[str, str]:
             line = line.strip()
             if not line:
                 continue
+            # Start of a laundering group block, e.g. "BEGIN LAUNDERING ATTEMPT - FAN-OUT"
             if line.startswith("BEGIN LAUNDERING ATTEMPT"):
                 match = re.search(r"BEGIN LAUNDERING ATTEMPT\s*-\s*([A-Za-z\-]+)", line)
                 if match:
                     current_pattern = match.group(1).upper()
+            # End of the current laundering block
             elif line.startswith("END LAUNDERING ATTEMPT"):
                 current_pattern = None
+            # Transaction row inside a block: save both sender (column 2) and receiver (column 4)
             elif current_pattern and "," in line:
                 parts = line.split(",")
                 if len(parts) >= 5:
@@ -43,11 +48,12 @@ def parse_patterns(patterns_path: Path = PATTERNS_TXT) -> Dict[str, str]:
                         account_patterns[sender] = current_pattern
                     if receiver:
                         account_patterns[receiver] = current_pattern
-                        
+
     return account_patterns
 
+
 def load_accounts(accounts_path: Path = ACCOUNTS_CSV) -> pd.DataFrame:
-    """Load accounts catalog and normalize columns."""
+    """Load the accounts CSV file and rename columns to simple snake_case names."""
     df_acc = pd.read_csv(accounts_path, dtype=str)
     rename_map = {
         "Bank Name": "bank_name",
@@ -60,22 +66,24 @@ def load_accounts(accounts_path: Path = ACCOUNTS_CSV) -> pd.DataFrame:
     df_acc["account_id"] = df_acc["account_id"].str.strip()
     return df_acc
 
+
 def load_transactions_sample(
     trans_path: Path = TRANSACTIONS_CSV,
     sample_size: int = 250000,
     include_all_laundering: bool = True
 ) -> pd.DataFrame:
     """
-    Loads transactions. When include_all_laundering=True, guarantees that ALL 5,177
-    laundering transactions are retained, combined with a sample of legitimate transactions
-    up to sample_size. This preserves full anomaly diversity while allowing fast execution.
+    Load transactions in chunks of 250,000 rows so we don't run out of RAM.
+    Why sample_size=250000 and include_all_laundering=True:
+      - Keeps 100% of the 5,177 laundering transactions so no criminal rings are broken.
+      - Pairs them with 250,000 legitimate transactions so training stays fast on any laptop.
     """
     col_names = [
         "timestamp", "from_bank", "from_account", "to_bank", "to_account",
         "amount_received", "receiving_currency", "amount_paid", "payment_currency",
         "payment_format", "is_laundering"
     ]
-    
+
     laundering_dfs = []
     legit_dfs = []
     legit_needed = sample_size
@@ -83,33 +91,36 @@ def load_transactions_sample(
 
     print(f"Loading transactions from {trans_path.name}...")
     for chunk in pd.read_csv(trans_path, names=col_names, header=0, chunksize=chunk_size, low_memory=False):
-        # Type conversions
+        # Clean numbers and strip extra spaces from account IDs
         chunk["amount_received"] = pd.to_numeric(chunk["amount_received"], errors="coerce").fillna(0.0)
         chunk["amount_paid"] = pd.to_numeric(chunk["amount_paid"], errors="coerce").fillna(0.0)
         chunk["is_laundering"] = pd.to_numeric(chunk["is_laundering"], errors="coerce").fillna(0).astype(int)
         chunk["from_account"] = chunk["from_account"].astype(str).str.strip()
         chunk["to_account"] = chunk["to_account"].astype(str).str.strip()
 
-        # Separate laundering and legitimate
+        # Keep every laundering row
         laund_chunk = chunk[chunk["is_laundering"] == 1]
         if not laund_chunk.empty and include_all_laundering:
             laundering_dfs.append(laund_chunk)
 
+        # Keep legitimate rows until we reach sample_size (250,000)
         if legit_needed > 0:
             legit_chunk = chunk[chunk["is_laundering"] == 0]
             take_count = min(len(legit_chunk), legit_needed)
             legit_dfs.append(legit_chunk.iloc[:take_count])
             legit_needed -= take_count
 
-        # If we collected enough legit rows and we don't need to scan full file for laundering:
         if not include_all_laundering and legit_needed <= 0:
             break
 
     df_laund = pd.concat(laundering_dfs, ignore_index=True) if laundering_dfs else pd.DataFrame(columns=col_names)
     df_legit = pd.concat(legit_dfs, ignore_index=True) if legit_dfs else pd.DataFrame(columns=col_names)
-    
+
     combined = pd.concat([df_laund, df_legit], ignore_index=True).drop_duplicates()
-    print(f"Loaded {len(combined):,} transactions: {len(df_laund):,} laundering ({len(df_laund)/len(combined)*100:.2f}%), {len(df_legit):,} legitimate.")
+    print(
+        f"Loaded {len(combined):,} transactions: {len(df_laund):,} laundering "
+        f"({len(df_laund)/len(combined)*100:.2f}%), {len(df_legit):,} legitimate."
+    )
     return combined
 
 
@@ -119,16 +130,20 @@ def resolve_laundering_typologies(
     base_patterns: Optional[Dict[str, str]] = None
 ) -> Dict[str, str]:
     """
-    3-Tier Topological & Subgraph Typology Resolver for all suspicious accounts.
-    Ensures 100% of suspicious accounts (is_suspicious == 1) and laundering transactions
-    (is_laundering == 1) are mapped to one of the 8 official laundering typologies:
-    GATHER-SCATTER, BIPARTITE, FAN-OUT, STACK, FAN-IN, SCATTER-GATHER, CYCLE, RANDOM.
+    Make sure 100% of suspicious accounts get an accurate laundering pattern (no 'NONE' labels).
+    Uses 3 simple steps:
+      1. Use the pattern from the text file if already listed.
+      2. If an account is connected to a laundering group in the graph, share the group's pattern
+         (or detect loops as CYCLE, 1-to-many as FAN-OUT, many-to-1 as FAN-IN, chains as STACK).
+      3. For remaining 2-account pairs, check their payment format and connections (e.g., Bitcoin/Cash
+         hops -> RANDOM, same-bank/Cheque -> CYCLE, multi-source -> GATHER-SCATTER / SCATTER-GATHER).
     """
     import networkx as nx
 
     acc_lookup = df_acc.sort_values("is_suspicious", ascending=False).drop_duplicates("account_id").set_index("account_id")
     known_acc_pat: Dict[str, str] = {}
 
+    # Step 1: Load known patterns from the text file
     if base_patterns:
         for k, v in base_patterns.items():
             if v and v != "NONE":
@@ -139,6 +154,7 @@ def resolve_laundering_typologies(
             if pat and pat != "NONE" and acc_id not in known_acc_pat:
                 known_acc_pat[acc_id] = str(pat)
 
+    # Build a graph of only the laundering transactions
     tx_laund = df_tx[df_tx["is_laundering"] == 1]
     G = nx.DiGraph()
     for _, r in tx_laund.iterrows():
@@ -149,32 +165,34 @@ def resolve_laundering_typologies(
             amt=float(r.get("amount_paid", 0.0) or 0.0)
         )
 
-    # Tier 2: Connected Laundering Subgraph Propagation & Multi-Node Structural Motifs
+    # Step 2: Check each connected group of laundering accounts
     for comp in nx.weakly_connected_components(G):
         pats = [known_acc_pat[n] for n in comp if n in known_acc_pat]
         if pats:
+            # Spread the most common known pattern across the connected group
             dom_pat = pd.Series(pats).mode().iloc[0]
             for n in comp:
                 known_acc_pat.setdefault(n, dom_pat)
         else:
+            # Otherwise identify the shape of the group
             sub = G.subgraph(comp)
             max_in = max(d for _, d in sub.in_degree())
             max_out = max(d for _, d in sub.out_degree())
             if not nx.is_directed_acyclic_graph(sub):
-                dom_pat = "CYCLE"
+                dom_pat = "CYCLE"      # Has a closed loop
             elif max_out >= 3 and max_out > max_in * 1.5:
-                dom_pat = "FAN-OUT"
+                dom_pat = "FAN-OUT"    # One sender splitting money to many receivers
             elif max_in >= 3 and max_in > max_out * 1.5:
-                dom_pat = "FAN-IN"
+                dom_pat = "FAN-IN"     # Many senders collecting into one receiver
             elif len(comp) >= 3:
-                dom_pat = "STACK"
+                dom_pat = "STACK"      # Multi-step chain
             else:
                 dom_pat = None
             if dom_pat:
                 for n in comp:
                     known_acc_pat[n] = dom_pat
 
-    # Tier 3: Full-Graph Topological Signature Classification for Remaining Pairs
+    # Step 3: Classify remaining small pairs by their full-graph degrees and payment rail
     def _classify_pair(u: str, v: str, fmt: str) -> str:
         ru = acc_lookup.loc[u] if u in acc_lookup.index else None
         rv = acc_lookup.loc[v] if v in acc_lookup.index else None
@@ -215,6 +233,7 @@ def resolve_laundering_typologies(
             for n in comp:
                 known_acc_pat[n] = pat
 
+    # Final fallback for any isolated suspicious account
     for acc_id, row in acc_lookup[acc_lookup["is_suspicious"] == 1].iterrows():
         if acc_id not in known_acc_pat:
             if float(row.get("out_degree", 0) or 0) >= 3:
